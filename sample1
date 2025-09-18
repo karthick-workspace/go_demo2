@@ -1,1 +1,437 @@
-demo1
+from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql.functions import *
+import json
+import pandas as pd
+from typing import Dict, List, Any
+
+# PyDeequ imports
+import pydeequ
+from pydeequ.analyzers import *
+from pydeequ.profiles import *
+from pydeequ.suggestions import *
+from pydeequ.checks import *
+from pydeequ.verification import *
+from pydeequ.constraints import *
+
+
+class PyDeequDatasetRulesAnalyzer:
+    """
+    Comprehensive analyzer using PyDeequ to extract rules and constraints from Spark datasets
+    """
+    
+    def __init__(self, spark_session=None):
+        if spark_session is None:
+            self.spark = SparkSession.builder \
+                .appName("PyDeequRulesAnalyzer") \
+                .config("spark.jars.packages", pydeequ.deequ_maven_coord) \
+                .config("spark.jars.excludes", pydeequ.f2j_maven_coord) \
+                .getOrCreate()
+        else:
+            self.spark = spark_session
+            
+        self.rules = {}
+        self.profile_result = None
+        self.constraint_suggestions = None
+        
+    def analyze_dataset(self, df: DataFrame, constraint_suggestion_runner_config=None):
+        """
+        Main method to analyze dataset and generate all possible rules using PyDeequ
+        """
+        print("Starting comprehensive PyDeequ dataset analysis...")
+        
+        # 1. Data Profiling
+        print("1. Running data profiling...")
+        self.profile_result = self._run_data_profiling(df)
+        
+        # 2. Constraint Suggestions
+        print("2. Generating constraint suggestions...")
+        self.constraint_suggestions = self._generate_constraint_suggestions(df, constraint_suggestion_runner_config)
+        
+        # 3. Extract rules from profiling
+        print("3. Extracting rules from profiling results...")
+        self._extract_profiling_rules()
+        
+        # 4. Extract constraint rules
+        print("4. Extracting constraint rules...")
+        self._extract_constraint_rules()
+        
+        # 5. Generate custom business rules
+        print("5. Generating custom business rules...")
+        self._generate_custom_business_rules(df)
+        
+        # 6. Generate data quality checks
+        print("6. Generating data quality verification checks...")
+        self._generate_verification_checks(df)
+        
+        return self.rules
+    
+    def _run_data_profiling(self, df: DataFrame):
+        """Run comprehensive data profiling using PyDeequ"""
+        try:
+            profile_result = ColumnProfilerRunner(self.spark) \
+                .onData(df) \
+                .run()
+            
+            return profile_result
+        except Exception as e:
+            print(f"Error in data profiling: {e}")
+            return None
+    
+    def _generate_constraint_suggestions(self, df: DataFrame, config=None):
+        """Generate constraint suggestions using PyDeequ"""
+        try:
+            if config is None:
+                constraint_suggestion_result = ConstraintSuggestionRunner(self.spark) \
+                    .onData(df) \
+                    .addConstraintRule(DEFAULT()) \
+                    .run()
+            else:
+                constraint_suggestion_result = config
+            
+            return constraint_suggestion_result
+        except Exception as e:
+            print(f"Error in constraint suggestions: {e}")
+            return None
+    
+    def _extract_profiling_rules(self):
+        """Extract rules from profiling results"""
+        if not self.profile_result:
+            return
+            
+        self.rules['profiling'] = {
+            'completeness': [],
+            'uniqueness': [],
+            'distinctness': [],
+            'statistics': [],
+            'patterns': []
+        }
+        
+        for column_name, column_profile in self.profile_result.profiles.items():
+            
+            # Completeness rules
+            if hasattr(column_profile, 'completeness') and column_profile.completeness is not None:
+                completeness = column_profile.completeness
+                self.rules['profiling']['completeness'].append({
+                    'column': column_name,
+                    'rule_type': 'completeness_constraint',
+                    'constraint': f'Column "{column_name}" completeness must be >= {completeness:.4f}',
+                    'value': completeness,
+                    'sql_constraint': f'completeness("{column_name}") >= {completeness:.4f}'
+                })
+            
+            # Uniqueness rules
+            if hasattr(column_profile, 'approximateNumDistinctValues') and column_profile.approximateNumDistinctValues is not None:
+                distinct_count = column_profile.approximateNumDistinctValues
+                total_count = getattr(column_profile, 'numRecords', 0)
+                if total_count > 0:
+                    uniqueness = distinct_count / total_count
+                    self.rules['profiling']['uniqueness'].append({
+                        'column': column_name,
+                        'rule_type': 'uniqueness_constraint',
+                        'constraint': f'Column "{column_name}" uniqueness ratio must be >= {uniqueness:.4f}',
+                        'value': uniqueness,
+                        'distinct_count': distinct_count,
+                        'total_count': total_count
+                    })
+            
+            # Data type rules
+            if hasattr(column_profile, 'dataType') and column_profile.dataType is not None:
+                data_type = column_profile.dataType
+                self.rules['profiling']['statistics'].append({
+                    'column': column_name,
+                    'rule_type': 'data_type_constraint',
+                    'constraint': f'Column "{column_name}" must be of type {data_type}',
+                    'data_type': data_type
+                })
+            
+            # Numeric statistics rules
+            if hasattr(column_profile, 'mean') and column_profile.mean is not None:
+                mean_val = column_profile.mean
+                self.rules['profiling']['statistics'].append({
+                    'column': column_name,
+                    'rule_type': 'mean_constraint',
+                    'constraint': f'Column "{column_name}" mean should be approximately {mean_val:.4f}',
+                    'value': mean_val
+                })
+            
+            if hasattr(column_profile, 'minimum') and column_profile.minimum is not None:
+                min_val = column_profile.minimum
+                self.rules['profiling']['statistics'].append({
+                    'column': column_name,
+                    'rule_type': 'minimum_constraint',
+                    'constraint': f'Column "{column_name}" minimum value is {min_val}',
+                    'value': min_val,
+                    'sql_constraint': f'min("{column_name}") >= {min_val}'
+                })
+            
+            if hasattr(column_profile, 'maximum') and column_profile.maximum is not None:
+                max_val = column_profile.maximum
+                self.rules['profiling']['statistics'].append({
+                    'column': column_name,
+                    'rule_type': 'maximum_constraint',
+                    'constraint': f'Column "{column_name}" maximum value is {max_val}',
+                    'value': max_val,
+                    'sql_constraint': f'max("{column_name}") <= {max_val}'
+                })
+    
+    def _extract_constraint_rules(self):
+        """Extract rules from constraint suggestions"""
+        if not self.constraint_suggestions:
+            return
+            
+        self.rules['constraint_suggestions'] = []
+        
+        for constraint in self.constraint_suggestions['constraint_suggestions']:
+            constraint_info = {
+                'description': constraint['description'],
+                'code_for_constraint': constraint['code_for_constraint'],
+                'column': constraint.get('column_name', 'N/A'),
+                'constraint_name': constraint.get('constraint_name', 'unknown')
+            }
+            
+            self.rules['constraint_suggestions'].append(constraint_info)
+    
+    def _generate_custom_business_rules(self, df: DataFrame):
+        """Generate custom business rules based on column names and patterns"""
+        self.rules['business_rules'] = {
+            'format_constraints': [],
+            'domain_constraints': [],
+            'relationship_constraints': []
+        }
+        
+        columns = df.columns
+        
+        for col_name in columns:
+            col_type = dict(df.dtypes)[col_name]
+            
+            # Email constraints
+            if any(keyword in col_name.lower() for keyword in ['email', 'mail']):
+                self.rules['business_rules']['format_constraints'].append({
+                    'column': col_name,
+                    'rule_type': 'email_format',
+                    'constraint': f'Column "{col_name}" must contain valid email format',
+                    'pattern': r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$',
+                    'deequ_check': f'hasPattern("{col_name}", "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{{2,}}$")'
+                })
+            
+            # Phone number constraints
+            if any(keyword in col_name.lower() for keyword in ['phone', 'tel', 'mobile']):
+                self.rules['business_rules']['format_constraints'].append({
+                    'column': col_name,
+                    'rule_type': 'phone_format',
+                    'constraint': f'Column "{col_name}" must contain valid phone format',
+                    'deequ_check': f'hasPattern("{col_name}", "^[+]?[1-9]?[0-9]{{7,15}}$")'
+                })
+            
+            # ID constraints
+            if col_name.lower().endswith('_id') or col_name.lower() == 'id':
+                self.rules['business_rules']['domain_constraints'].append({
+                    'column': col_name,
+                    'rule_type': 'id_constraint',
+                    'constraint': f'Column "{col_name}" must be non-null and unique',
+                    'deequ_checks': [
+                        f'isComplete("{col_name}")',
+                        f'isUnique("{col_name}")'
+                    ]
+                })
+            
+            # Date constraints
+            if any(keyword in col_name.lower() for keyword in ['date', 'time', 'created', 'updated']):
+                if col_type in ['date', 'timestamp']:
+                    self.rules['business_rules']['domain_constraints'].append({
+                        'column': col_name,
+                        'rule_type': 'date_validity',
+                        'constraint': f'Column "{col_name}" must contain valid dates',
+                        'deequ_check': f'isComplete("{col_name}")'
+                    })
+            
+            # Status/Category constraints
+            if any(keyword in col_name.lower() for keyword in ['status', 'category', 'type', 'state']):
+                try:
+                    # Get distinct values (limit to avoid large sets)
+                    distinct_values = df.select(col_name).distinct().limit(50).rdd.map(lambda r: r[0]).collect()
+                    if len(distinct_values) <= 20 and None not in distinct_values:
+                        values_str = "', '".join([str(v) for v in distinct_values if v is not None])
+                        self.rules['business_rules']['domain_constraints'].append({
+                            'column': col_name,
+                            'rule_type': 'enumeration',
+                            'constraint': f'Column "{col_name}" must be one of the predefined values',
+                            'allowed_values': distinct_values,
+                            'deequ_check': f'isContainedIn(\"{col_name}\", [\'{values_str}\'])"'
+                        })
+                except:
+                    pass
+    
+    def _generate_verification_checks(self, df: DataFrame):
+        """Generate PyDeequ verification checks that can be used for ongoing monitoring"""
+        self.rules['verification_checks'] = {
+            'check_builder_code': [],
+            'individual_checks': []
+        }
+        
+        # Generate a comprehensive check builder
+        check_code_parts = [
+            "from pydeequ.checks import Check, CheckLevel",
+            "from pydeequ.verification import VerificationSuite",
+            "",
+            "# Comprehensive data quality checks",
+            "check = Check(spark, CheckLevel.Warning, 'Data Quality Check')"
+        ]
+        
+        # Add completeness checks for all columns
+        for col_name in df.columns:
+            check_code_parts.append(f"    .isComplete('{col_name}')")
+            self.rules['verification_checks']['individual_checks'].append({
+                'type': 'completeness',
+                'column': col_name,
+                'check': f"isComplete('{col_name}')"
+            })
+        
+        # Add uniqueness checks for ID columns
+        id_columns = [col for col in df.columns if col.lower().endswith('_id') or col.lower() == 'id']
+        for col_name in id_columns:
+            check_code_parts.append(f"    .isUnique('{col_name}')")
+            self.rules['verification_checks']['individual_checks'].append({
+                'type': 'uniqueness',
+                'column': col_name,
+                'check': f"isUnique('{col_name}')"
+            })
+        
+        # Add numeric range checks
+        numeric_cols = [col_name for col_name, col_type in df.dtypes 
+                       if col_type in ['int', 'bigint', 'float', 'double', 'decimal']]
+        
+        for col_name in numeric_cols:
+            check_code_parts.append(f"    .isNonNegative('{col_name}')")  # Assuming non-negative values
+            self.rules['verification_checks']['individual_checks'].append({
+                'type': 'non_negative',
+                'column': col_name,
+                'check': f"isNonNegative('{col_name}')"
+            })
+        
+        # Complete the check builder code
+        check_code_parts.extend([
+            "",
+            "# Run verification",
+            "verification_result = VerificationSuite(spark) \\",
+            "    .onData(df) \\",
+            "    .addCheck(check) \\",
+            "    .run()",
+            "",
+            "# Print results",
+            "verification_result_df = VerificationResult.checkResultsAsDataFrame(spark, verification_result)",
+            "verification_result_df.show()"
+        ])
+        
+        self.rules['verification_checks']['check_builder_code'] = '\n'.join(check_code_parts)
+    
+    def export_rules_to_json(self, filename='dataset_rules.json'):
+        """Export all rules to a JSON file"""
+        with open(filename, 'w') as f:
+            json.dump(self.rules, f, indent=2, default=str)
+        print(f"Rules exported to {filename}")
+    
+    def export_rules_to_dataframe(self):
+        """Export rules to Spark DataFrame for further analysis"""
+        rules_data = []
+        
+        for category, rules_list in self.rules.items():
+            if isinstance(rules_list, dict):
+                for subcategory, sub_rules in rules_list.items():
+                    if isinstance(sub_rules, list):
+                        for rule in sub_rules:
+                            rule_row = {
+                                'category': category,
+                                'subcategory': subcategory,
+                                'rule_type': rule.get('rule_type', ''),
+                                'column': rule.get('column', ''),
+                                'constraint': rule.get('constraint', ''),
+                                'rule_details': str(rule)
+                            }
+                            rules_data.append(rule_row)
+            elif isinstance(rules_list, list):
+                for rule in rules_list:
+                    rule_row = {
+                        'category': category,
+                        'subcategory': '',
+                        'rule_type': rule.get('rule_type', ''),
+                        'column': rule.get('column', ''),
+                        'constraint': rule.get('constraint', ''),
+                        'rule_details': str(rule)
+                    }
+                    rules_data.append(rule_row)
+        
+        if rules_data:
+            rules_df = self.spark.createDataFrame(rules_data)
+            return rules_df
+        else:
+            return None
+    
+    def print_summary(self):
+        """Print a summary of generated rules"""
+        print("\n" + "="*80)
+        print("DATASET RULES AND CONSTRAINTS SUMMARY")
+        print("="*80)
+        
+        total_rules = 0
+        for category, rules_list in self.rules.items():
+            if isinstance(rules_list, dict):
+                category_count = sum(len(sub_rules) if isinstance(sub_rules, list) else 1 
+                                   for sub_rules in rules_list.values())
+            elif isinstance(rules_list, list):
+                category_count = len(rules_list)
+            else:
+                category_count = 1
+            
+            total_rules += category_count
+            print(f"{category.upper()}: {category_count} rules")
+        
+        print(f"\nTOTAL RULES GENERATED: {total_rules}")
+        print("="*80)
+
+
+# Example usage function
+def analyze_my_dataset(df: DataFrame, spark: SparkSession = None):
+    """
+    Convenience function to analyze a dataset
+    """
+    analyzer = PyDeequDatasetRulesAnalyzer(spark)
+    rules = analyzer.analyze_dataset(df)
+    
+    # Print summary
+    analyzer.print_summary()
+    
+    # Export results
+    analyzer.export_rules_to_json('my_dataset_rules.json')
+    rules_df = analyzer.export_rules_to_dataframe()
+    
+    if rules_df:
+        print("\nRules DataFrame created. Sample:")
+        rules_df.show(10, truncate=False)
+    
+    return analyzer, rules
+
+
+# Example usage:
+"""
+# Initialize Spark with PyDeequ
+spark = SparkSession.builder \
+    .appName("DatasetRulesAnalysis") \
+    .config("spark.jars.packages", pydeequ.deequ_maven_coord) \
+    .config("spark.jars.excludes", pydeequ.f2j_maven_coord) \
+    .getOrCreate()
+
+# Load your dataset
+df = spark.read.option("header", "true").csv("your_dataset.csv")
+
+# Analyze the dataset
+analyzer, rules = analyze_my_dataset(df, spark)
+
+# Access specific rule categories
+profiling_rules = rules.get('profiling', {})
+business_rules = rules.get('business_rules', {})
+constraint_suggestions = rules.get('constraint_suggestions', [])
+
+# Use the verification checks code
+print(rules['verification_checks']['check_builder_code'])
+"""
